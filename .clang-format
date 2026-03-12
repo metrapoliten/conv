@@ -1,0 +1,15 @@
+---
+BasedOnStyle: LLVM
+AccessModifierOffset: -1
+AlignArrayOfStructures: Left
+AlignConsecutiveAssignments:
+  Enabled: true
+  AlignFunctionDeclarations: true
+AlignConsecutiveBitFields:
+  Enabled: true
+AlignConsecutiveMacros:
+  Enabled: true
+BreakBeforeBraces: Stroustrup
+PointerAlignment: Left
+QualifierAlignment: Right
+SpaceBeforeCpp11BracedList: true
