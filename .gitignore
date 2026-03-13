@@ -1,0 +1,7 @@
+# Xmake cache
+.xmake/
+build/
+
+# editors
+.idea/
+.vscode
