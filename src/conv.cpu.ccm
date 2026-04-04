@@ -1,0 +1,142 @@
+export module conv:cpu;
+export import :core;
+
+namespace conv::cpu::impl {
+using namespace conv::core;
+template <class ExecutionPolicy, Kernel K>
+auto convolve(ExecutionPolicy const& policy, Image const& in, K const& kernel,
+              BorderType type) -> Image
+{
+
+  using std::views::iota;
+
+  using u32 = std::uint32_t;
+  using i64 = std::int64_t;
+
+  auto const h {static_cast<i64>(in.getH().get())};
+  auto const w {static_cast<i64>(in.getW().get())};
+
+  auto const k_dim {static_cast<i64>(kernel.getDim())};
+  auto const k_mid {static_cast<i64>(k_dim / 2)};
+
+  Image out {Width(static_cast<u32>(w)), Height(static_cast<u32>(h)),
+             std::vector<Px>(static_cast<std::size_t>(w * h))};
+
+  auto in_view {in.view()};
+  auto k_view {kernel.view()};
+  auto out_view {out.view()};
+
+  auto border_fetch {[&](i64 y, i64 x) -> auto {
+    auto val {KValueT {0}};
+    if (y >= 0 && y < h && x >= 0 && x < w) [[likely]] {
+      val = in_view[y, x];
+    }
+    else if (type == BorderType::Repeat) {
+      y   = std::clamp(y, i64 {0}, h - 1);
+      x   = std::clamp(x, i64 {0}, w - 1);
+      val = in_view[y, x];
+    } // else core::BorderType::Zero
+    return val;
+  }};
+
+  auto compute_px {[&](i64 y, i64 x, auto fetch) -> auto {
+    auto const k_iter {iota(-k_mid, k_mid + 1)};
+    auto sum {KValueT {0}};
+    for (auto ky : k_iter) {
+      for (auto kx : k_iter) {
+#pragma clang fp contract(on)
+        sum += fetch(y + ky, x + kx) * k_view[k_mid - ky, k_mid - kx];
+      }
+    }
+    constexpr auto kPxMin {std::numeric_limits<Px>::min()};
+    constexpr auto kPxMax {std::numeric_limits<Px>::max()};
+    auto const val {static_cast<Px>(std::clamp(std::round(sum),
+                                               static_cast<KValueT>(kPxMin),
+                                               static_cast<KValueT>(kPxMax)))};
+    out_view[y, x] = val;
+  }};
+
+  auto const rows {iota(i64 {0}, h)};
+  auto const cols {iota(i64 {0}, w)};
+
+  if (h < k_dim || w < k_dim) {
+    for (auto y : rows) {
+      for (auto x : cols) {
+        compute_px(y, x, border_fetch);
+      }
+    }
+    return out;
+  }
+
+  /*
+   * top
+   * ------------------
+   * left | mid | right
+   * ------------------
+   * bottom
+   */
+
+  /* top and bottom */
+  auto const tb_rows {iota(i64 {0}, k_dim)};
+
+  std::for_each(policy, tb_rows.begin(), tb_rows.end(), [&](auto i) -> auto {
+    auto const y = (i < k_mid) ? i : (h - k_dim + i);
+    for (auto x : cols) {
+      compute_px(y, x, border_fetch);
+    }
+  });
+
+  /* middle */
+  auto const mid_rows {iota(k_mid, h - k_mid)};
+  auto const mid_cols {iota(k_mid, w - k_mid)};
+
+  auto const left_cols {iota(i64 {0}, k_mid)};
+  auto const right_cols {iota(w - k_mid, w)};
+
+  std::for_each(policy, mid_rows.begin(), mid_rows.end(), [&](auto y) -> auto {
+    for (auto x : left_cols) {
+      compute_px(y, x, border_fetch);
+    }
+    for (auto x : mid_cols) {
+      compute_px(static_cast<u32>(y), static_cast<u32>(x),
+                 [in_view](auto arg_y, auto arg_x) {
+                   return static_cast<KValueT>(in_view[arg_y, arg_x]);
+                 });
+    }
+    for (auto x : right_cols) {
+      compute_px(y, x, border_fetch);
+    }
+  });
+
+  return out;
+}
+} // namespace conv::cpu::impl
+
+export namespace conv::cpu {
+/// \brief Applies a sequential 2D convolution to the input image.
+/// \tparam K The kernel type, satisfying the conv::core::Kernel concept.
+/// \param img The grayscale input image.
+/// \param kernel The convolution kernel (static or dynamic).
+/// \param type The strategy used to handle pixels along the image borders.
+/// \return A new image representing the convolved output.
+template <core::Kernel K>
+auto convolveSeq(core::Image const& img, K const& kernel, core::BorderType type)
+    -> core::Image
+{
+  return impl::convolve(std::execution::seq, img, kernel, type);
+}
+
+template <core::Kernel K>
+/// \brief Applies a parallel 2D convolution to the input image.
+/// \tparam K The kernel type, satisfying the conv::core::Kernel concept.
+/// \param img The grayscale input image.
+/// \param kernel The convolution kernel (static or dynamic).
+/// \param type The strategy used to handle pixels along the image borders.
+/// \return A new image representing the convolved output
+auto convolvePar(core::Image const& img, K const& kernel, core::BorderType type)
+    -> core::Image
+{
+  return impl::convolve(std::execution::par, img, kernel, type);
+}
+
+} // namespace conv::cpu
