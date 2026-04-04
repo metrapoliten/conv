@@ -1,1 +1,71 @@
 = conv
+
+A C++26 library with modules for grayscale image convolution.
+
+== Features
+
+* **Execution Strategies**: Support for both sequential and auto-parallelized loops using standard C++ execution policies.
+* **Flexible Kernels**:
+  ** *Compile-time Kernels*: `StaticKernel` allows generation of kernels at compile time
+  ** *Runtime Kernels*: `DynKernel` allows loading and creating arbitrarily sized (odd-dimension) kernels dynamically
+* **Predefined Filters**: Includes mathematical generators for standard filters:
+  ** 3x3 Emboss
+  ** 5x5 Gaussian Blur
+  ** 7x7 Sobel Operator (X-axis)
+* **Border Handling**: Supports `Repeat` (clamping to edge) and `Zero` (padding with black) edge strategies
+
+== Requirements
+
+* LLVM22 toolchain
+* xmake
+* CPU with FMA
+
+== Architecture
+
+The source code is structured into distinct module partitions:
+
+* `conv.core.ccm`: Core primitives (`Image`, `BorderType`), strongly typed dimensions, and kernel concepts
+* `conv.cpu.ccm`: The primary convolution math
+* `conv.io.ccm`: For disk I/O operations
+
+== Build and Test
+
+[source,bash]
+----
+# Release build
+xmake f -m release
+xmake
+
+# Debug build with Hardening
+xmake f -m debug --hardening=y
+xmake
+
+# Run unit tests
+xmake test
+----
+
+== Usage Example
+
+[source,cpp]
+----
+import conv;
+import std;
+
+auto main() -> int {
+    // 1. Load a grayscale image from disk
+    auto img {conv::io::loadGrayscaleImage("in.png")};
+
+    // 2. Select a border type
+    auto btype {conv::core::BorderType::Repeat};
+
+    // 3. Apply a parallelized 5x5 Gaussian blur
+    auto blurred {conv::cpu::convolvePar(
+        img, 
+        conv::core::kernel::kGaussian5x5, 
+        btype
+    )};
+
+    // 4. Save the result
+    conv::io::savePNG("out.png", blurred);
+}
+----
