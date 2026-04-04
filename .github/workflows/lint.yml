@@ -1,0 +1,35 @@
+name: Check formatting
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: '0'
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          actions-cache-folder: '.xmake-cache'
+
+      - name: Install Clang 22
+        run: |
+          sudo add-apt-repository "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-get update
+          sudo apt-get install clang-format-22 -y --no-install-recommends
+          echo "/usr/lib/llvm-22/bin" >> $GITHUB_PATH
+
+      - name: Check Formatting
+        run: |
+          find src/ test/ -type f -exec clang-format --dry-run --Werror {} +

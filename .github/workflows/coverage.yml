@@ -1,0 +1,59 @@
+name: Coverage
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-coverage
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: '0'
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          actions-cache-folder: '.xmake-cache'
+
+      - name: Install LLVM22 toolchain
+        run: |
+          sudo add-apt-repository "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-get update
+          sudo apt-get install clang-22 lld-22 clang-tools-22 llvm-22 libc++-22-dev libc++abi-22-dev libclang-rt-22-dev -y --no-install-recommends
+
+      - name: Build and test
+        run: |
+          xmake f --sdk=/usr/lib/llvm-22 -m coverage
+          xmake
+          xmake test -w .
+
+      - name: Generate LLVM coverage
+        run: |
+          llvm-profdata-22 merge -sparse default.profraw -o default.profdata
+          llvm-cov-22 export -format=text ./build/linux/x86_64/coverage/test -instr-profile=default.profdata src/ > coverage.info
+          llvm-cov-22 report ./build/linux/x86_64/coverage/test -instr-profile=default.profdata src/ > coverage.txt
+          cat coverage.txt
+
+      - name: Enforce ≥95% Line Coverage
+        run: |
+          TOTAL_COV=$(tail -n 1 coverage.txt | awk '{print $4}' | sed 's/%//')
+          echo "Total line coverage is $TOTAL_COV%"
+          
+          awk -v cov="$TOTAL_COV" 'BEGIN { 
+            if (cov < 95.0) { 
+              print "Error: Line coverage is below 95% threshold!"; 
+              exit 1; 
+            } 
+          }'
