@@ -9,7 +9,7 @@ set_languages("c++2c")
 set_warnings("everything", "error")
 add_cxxflags("-fexperimental-library")
 if not is_plat("windows") then
-    add_links("c++abi")
+    add_syslinks("c++abi")
 end
 
 set_runtimes("c++_static")
@@ -59,10 +59,28 @@ if has_config("hardening") then
     add_defines("_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG")
 end
 
+package("taskflow")
+    set_kind("library", {headeronly = true})
+    set_urls("https://github.com/taskflow/taskflow/archive/refs/tags/$(version).tar.gz")
+    add_versions("v4.0.0", "a9d27ad29caffc95e394976c6a362debb94194f9b3fbb7f25e34aaf54272f497")
+
+    on_install(function (package)
+        io.gsub("taskflow/taskflow.hpp", "^(.-%s+.-%s+)", "%1#include <bit>\n")
+        os.cp("taskflow", package:installdir("include"))
+    end)
+
+    if is_plat("linux") then
+        add_syslinks("pthread")
+    end
+package_end()
+
+add_requires("taskflow")
+
 target("conv")
     set_kind("static")
     add_sysincludedirs("deps", { private = true })
     add_cxxflags("-Wno-padded")
+    add_packages("taskflow")
     add_files("src/*.cc")
     add_files("src/*.ccm", { public = true })
 
