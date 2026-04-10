@@ -1,0 +1,124 @@
+module;
+
+#include <taskflow/algorithm/pipeline.hpp>
+#include <taskflow/taskflow.hpp>
+
+export module conv:pipeline;
+
+export import :core;
+
+import std;
+import :io;
+import :cpu;
+
+namespace {
+namespace fs = std::filesystem;
+struct Item {
+  fs::path _path;
+  std::expected<conv::core::Image, fs::path> _res {std::unexpect, ""};
+};
+} // namespace
+
+export namespace conv::pipeline {
+
+/**
+ * @brief Orchestrates a three-stage streaming pipeline for image convolution.
+ *
+ * This function implements a task-based pipeline pattern to process a
+ * collection of images.
+ *
+ * The pipeline architecture consists of:
+ * - Stage 1 (Serial): A loader that reads images from the filesystem into
+ * memory.
+ * - Stage 2 (Parallel): A worker stage that applies the convolution kernel.
+ * This stage scales across multiple threads based on the provided worker count.
+ * - Stage 3 (Serial): A saver that writes the processed results to the
+ * target directory as PNG files.
+ *
+ * @tparam K The kernel type, satisfying the `conv::core::Kernel` concept.
+ *
+ * @param files A span of filesystem paths representing the source images to be
+ * processed.
+ * @param out_dir The destination directory where processed images will be
+ * saved.
+ * @param kernel The convolution kernel (static or dynamic) to apply to the
+ * images.
+ * @param type The strategy used to handle pixels along the image borders.
+ * @param num_workers The number of concurrent processing lines in the pipeline,
+ * defining the degree of parallelism for the CPU stage.
+ *
+ * @throws std::runtime_error If a file cannot be saved to the output directory
+ * or if a critical processing error occurs within the pipeline stages.
+ */
+template <core::Kernel K>
+auto runConvPipeline(std::span<std::filesystem::path const> files,
+                     std::filesystem::path const& out_dir, K const& kernel,
+                     core::BorderType type, std::size_t num_workers) -> void
+{
+  using namespace conv;
+
+  tf::Taskflow taskflow;
+  tf::Executor executor;
+
+  std::vector<Item> buf(num_workers);
+
+  auto loader_logic = [&files, &buf](tf::Pipeflow& pf) {
+    if (pf.token() >= files.size()) {
+      pf.stop();
+      return;
+    }
+
+    auto& item {buf[pf.line()]};
+    item._path = {files[pf.token()]};
+
+    try {
+      item._res = {io::loadGrayscaleImage(item._path)};
+    }
+    catch (std::exception const& e) {
+      item._res = {std::unexpected(e.what())};
+    }
+  };
+  tf::Pipe<decltype(loader_logic)> const loader_pipe {tf::PipeType::SERIAL,
+                                                      std::move(loader_logic)};
+
+  auto conv_logic = [&kernel, &buf, type](tf::Pipeflow& pf) {
+    auto& item {buf[pf.line()]};
+
+    if (item._res.has_value()) {
+      item._res = {cpu::convolveSeq(item._res.value(), kernel, type)};
+    }
+  };
+  tf::Pipe<decltype(conv_logic)> const conv_pipe {tf::PipeType::PARALLEL,
+                                                  std::move(conv_logic)};
+
+  auto saver_logic = [&out_dir, &buf](tf::Pipeflow& pf) {
+    auto& item = buf[pf.line()];
+
+    if (item._res.has_value()) {
+      auto const out_path {out_dir / item._path.filename()};
+      try {
+        io::savePNG(out_path, item._res.value());
+      }
+      catch (std::exception const& e) {
+        throw std::runtime_error(e.what());
+      }
+    }
+    else {
+      throw std::runtime_error(
+          "Failed to process image: " + item._path.string() +
+          ". Reason: " + item._res.error().string());
+    }
+  };
+  tf::Pipe<decltype(saver_logic)> const saver_pipe {tf::PipeType::SERIAL,
+                                                    std::move(saver_logic)};
+
+  tf::Pipeline<decltype(loader_pipe), decltype(conv_pipe), decltype(saver_pipe)>
+      pl(num_workers, std::move(loader_pipe), std::move(conv_pipe),
+         std::move(saver_pipe));
+
+  taskflow.composed_of(pl).name("Image Processing Pipeline");
+
+  executor.run(taskflow).wait();
+}
+
+} // namespace conv::pipeline

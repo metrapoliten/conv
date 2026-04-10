@@ -235,6 +235,77 @@ auto testIO()
         [] { loadGrayscaleImage("this_file_doesnt_exist.png"); }));
   };
 }
+
+auto testPipeline()
+{
+  namespace fs = std::filesystem;
+
+  "Empty file list runs without error"_test = [] {
+    std::vector<fs::path> files;
+    auto out_dir = fs::temp_directory_path();
+    expect(nothrow([&] {
+      conv::pipeline::runConvPipeline(files, out_dir, kernel::kGaussian5x5, BorderType::Zero, 2);
+    }));
+  };
+
+  "Valid end-to-end pipeline execution"_test = [] {
+    auto base_dir = fs::temp_directory_path() / "conv_pipeline_test_valid";
+    auto in_dir   = base_dir / "in";
+    auto out_dir  = base_dir / "out";
+    
+    fs::create_directories(in_dir);
+    fs::create_directories(out_dir);
+
+    // Create 2 valid dummy images
+    Image const img1(Width(2), Height(2), {10, 20, 30, 40});
+    Image const img2(Width(2), Height(2), {50, 60, 70, 80});
+
+    auto path1 = in_dir / "img1.png";
+    auto path2 = in_dir / "img2.png";
+    savePNG(path1, img1);
+    savePNG(path2, img2);
+
+    std::vector<fs::path> files {path1.string(), path2.string()};
+
+    expect(nothrow([&] {
+      conv::pipeline::runConvPipeline(files, out_dir, kernel::kGaussian5x5, BorderType::Zero, 2);
+    }));
+
+    expect(fs::exists(out_dir / "img1.png")) << "Pipeline failed to write img1.png";
+    expect(fs::exists(out_dir / "img2.png")) << "Pipeline failed to write img2.png";
+
+    auto res = loadGrayscaleImage(out_dir / "img1.png");
+    expect(res.getW().get() == 2_u);
+    expect(res.getH().get() == 2_u);
+
+    fs::remove_all(base_dir);
+  };
+
+  "Graceful handling of missing input files"_test = [] {
+    auto out_dir = fs::temp_directory_path();
+    std::vector<fs::path> files {"/this/file/definitely/doesnt/exist.png"};
+    expect(nothrow([&] {
+      conv::pipeline::runConvPipeline(files, out_dir, kernel::kGaussian5x5, BorderType::Zero,  1);
+    })) << "Pipeline should catch reader exceptions and not crash.";
+  };
+
+  "Graceful handling of invalid output directory"_test = [] {
+    auto in_dir  = fs::temp_directory_path() / "conv_pipeline_test_bad_out";
+    auto out_dir = "/this/output/dir/doesnt/exist/either";
+    fs::create_directories(in_dir);
+
+    Image const img(Width(2), Height(2), {10, 20, 30, 40});
+    auto path = in_dir / "img_bad_out.png";
+    savePNG(path, img);
+
+    std::vector<fs::path> files {path.string()};
+    expect(nothrow([&] {
+      conv::pipeline::runConvPipeline(files, out_dir, kernel::kGaussian5x5, BorderType::Zero,  2);
+    })) << "Pipeline should catch writer exceptions and not crash.";
+
+    fs::remove_all(in_dir);
+  };
+}
 } // namespace
 
 auto main() -> int
@@ -245,6 +316,7 @@ auto main() -> int
     testKernel();
     testConvolution();
     testIO();
+    testPipeline();
   }
   catch (std::exception const& e) {
     std::cerr << "Unhandled exception in main: " << e.what() << '\n';

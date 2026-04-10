@@ -3,3 +3,4 @@ export module conv;
 export import :core;
 export import :cpu;
 export import :io;
+export import :pipeline;
