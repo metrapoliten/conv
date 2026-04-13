@@ -1,0 +1,233 @@
+export module conv:core;
+
+import std;
+
+namespace conv::core::impl {
+template <class T, class Tag> struct Type {
+  constexpr explicit Type(T val) noexcept(
+      std::is_nothrow_copy_constructible_v<T>)
+      : _val(std::move(val))
+  {
+  }
+
+  [[nodiscard]] constexpr explicit operator T() const noexcept { return _val; }
+  [[nodiscard]] constexpr auto get() noexcept { return _val; }
+  [[nodiscard]] constexpr auto get() const noexcept { return _val; }
+
+  auto operator<=>(Type const&) const = default;
+
+ private:
+  T _val;
+};
+struct WidthTag {};
+struct HeightTag {};
+} // namespace conv::core::impl
+
+export namespace conv::core {
+
+/// \brief Defines the boundary handling strategy for pixels outside the image
+/// area.
+enum class BorderType : std::uint8_t {
+  /// \brief Replicates the nearest edge pixel
+  Repeat,
+  /// \brief Treats out-of-bounds pixels as strictly zero
+  Zero,
+};
+
+/// \brief Strongly-typed width dimension
+using Width = impl::Type<std::uint32_t, impl::WidthTag>;
+/// \brief Strongly-typed height dimension
+using Height = impl::Type<std::uint32_t, impl::HeightTag>;
+
+/// \brief Standard 2D extents for image spans
+using dims2d = std::dextents<std::uint32_t, 2>;
+/// \brief Base pixel type representing grayscale values (0-255)
+using Px = std::uint8_t;
+/// \brief Mutable 2D view of image data
+using ImageMdSpan = std::mdspan<Px, dims2d>;
+/// \brief Read-only 2D view of image data
+using ConstImageMdSpan = std::mdspan<Px const, dims2d>;
+/// \brief Contiguous read-only 1D view, useful for I/O operations like saving
+/// PNGs
+using ConstImageSpan = std::span<Px const>;
+
+/// \brief Container for 2D grayscale image data.
+///
+/// Manages the lifetime of the pixel buffer and provides multidimensional span
+/// views for processing.
+struct Image {
+  /// \brief Constructs an image with specified dimensions and takes ownership
+  /// of the data.
+  /// \param w Strongly-typed width.
+  /// \param h Strongly-typed height.
+  /// \param data Flat vector of grayscale pixels.
+  /// \throws std::invalid_argument if the data size does not match width *
+  /// height
+  Image(Width w, Height h, std::vector<Px> data)
+      : _w(w), _h(h), _data(std::move(data))
+  {
+    if (static_cast<std::size_t>(_w.get()) * _h.get() != _data.size()) {
+      throw std::invalid_argument(
+          "Image data size doesn't match dims. W*H = " +
+          std::to_string(w.get()) + "*" + std::to_string(h.get()) +
+          ". Data size = " + std::to_string(_data.size()));
+    }
+  }
+
+  Image(Image const&)                    = delete;
+  auto operator=(Image const&) -> Image& = delete;
+
+  Image(Image&&)                    = default;
+  auto operator=(Image&&) -> Image& = default;
+
+  ~Image() = default;
+
+  auto view() { return ImageMdSpan {_data.data(), _h.get(), _w.get()}; }
+  [[nodiscard]] auto view() const
+  {
+    return ConstImageMdSpan {_data.data(), _h.get(), _w.get()};
+  }
+
+  [[nodiscard]] auto span() const { return ConstImageSpan {_data}; }
+
+  [[nodiscard]] auto getW() const { return _w; }
+  [[nodiscard]] auto getH() const { return _h; }
+
+ private:
+  Width _w;
+  Height _h;
+  std::vector<Px> _data;
+};
+
+/// \brief Underlying floating-point type used for kernel weights
+using KValueT = double;
+/// \brief 2D view of kernel weights
+using KView = std::mdspan<KValueT const, dims2d>;
+
+/// \brief A compile-time fixed-size convolution kernel.
+/// \tparam Dim The dimensions of the kernel (must be odd)
+template <std::uint32_t Dim>
+  requires(Dim % 2 == 1)
+struct StaticKernel {
+  using value_type = KValueT;
+
+  explicit constexpr StaticKernel(
+      std::array<value_type, static_cast<std::size_t>(Dim) * Dim> data)
+      : _data(std::move(data))
+  {
+  }
+
+  [[nodiscard]] constexpr auto view() const noexcept -> KView
+  {
+    return KView(_data.data(), Dim, Dim);
+  }
+  [[nodiscard]] constexpr auto getDim() const noexcept { return Dim; }
+
+ private:
+  std::array<value_type, static_cast<std::size_t>(Dim) * Dim> _data;
+};
+
+namespace kernel {
+/// \brief 3x3 Emboss edge-enhancing filter
+inline constexpr auto kEmboss3x3 = []() consteval {
+  static constexpr auto kDim {3UL};
+
+  return StaticKernel<kDim>({-1., -1., 0., //
+                             -1., 0., 1.,  //
+                             0., 1., 1.});
+}();
+/// \brief 5x5 Gaussian blur filter, normalized to preserve image brightness.
+inline constexpr auto kGaussian5x5 = []() consteval {
+  static constexpr std::uint32_t kDim            = 5;
+  static constexpr std::array<KValueT, kDim> k1D = {1, 4, 6, 4, 1};
+
+  static constexpr auto kDiv = [] {
+    auto sum = std::ranges::fold_left(k1D, 0.0, std::plus {});
+    return sum * sum;
+  }();
+
+  constexpr auto kMakeArr = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+    return std::array<KValueT, kDim * kDim> {
+        ((k1D[Is / kDim] * k1D[Is % kDim]) / kDiv)...};
+  };
+
+  return StaticKernel<kDim> {kMakeArr(
+      std::make_index_sequence<static_cast<std::size_t>(kDim) * kDim> {})};
+}();
+
+/// \brief 7x7 Sobel operator for calculating horizontal derivatives.
+inline constexpr auto kSobelX7x7 = []() consteval {
+  static constexpr auto kDim {7};
+
+  static constexpr std::array<KValueT, kDim> kSmooth = {1, 6, 15, 20, 15, 6, 1};
+  static constexpr std::array<KValueT, kDim> kDeriv  = {-1, -4, -5, 0, 5, 4, 1};
+
+  // Construct the 2D array via outer product
+  constexpr auto kMakeArr = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+    return std::array<KValueT, static_cast<std::size_t>(kDim * kDim)> {
+        (kSmooth[Is / kDim] * kDeriv[Is % kDim])...};
+  };
+
+  constexpr auto kArr = kMakeArr(
+      std::make_index_sequence<static_cast<std::size_t>(kDim * kDim)> {});
+
+  return StaticKernel<kDim>(kArr);
+}();
+
+} // namespace kernel
+
+/// \brief A dynamically-sized convolution kernel evaluated at runtime
+struct DynKernel {
+  using value_type = KValueT;
+
+  /// \brief Constructs a runtime kernel.
+  /// \param dim The dimension of the kernel. Must be an odd number.
+  /// \param data Flat vector of kernel weights.
+  /// \throws std::invalid_argument if the dimension is even or data size
+  /// mismatches dim*dim
+  explicit constexpr DynKernel(std::uint32_t dim, std::vector<value_type> data)
+      : _dim(dim), _data(std::move(data))
+  {
+    if (dim % 2 != 1) {
+      throw std::invalid_argument("Kernel must have odd dims. Provided dim = " +
+                                  std::to_string(dim));
+    }
+    auto const dim_prod {dim * dim};
+    auto const data_size {_data.size()};
+    if (dim_prod != data_size) {
+      auto const dim_str {std::to_string(dim)};
+      auto const dim_prod_str {std::to_string(dim_prod)};
+      auto const data_size_str {std::to_string(data_size)};
+      throw std::invalid_argument(
+          "Kernel data size doesn't match dims: dim*dim = " + dim_str + "*" +
+          dim_str + " = " + dim_prod_str + ", data size = " + data_size_str);
+    }
+  }
+
+  DynKernel(DynKernel const&)                    = delete;
+  auto operator=(DynKernel const&) -> DynKernel& = delete;
+
+  DynKernel(DynKernel&&)                    = default;
+  auto operator=(DynKernel&&) -> DynKernel& = default;
+
+  ~DynKernel() = default;
+
+  [[nodiscard]] constexpr auto view() const
+  {
+    return KView(_data.data(), _dim, _dim);
+  }
+  [[nodiscard]] auto getDim() const { return _dim; }
+
+ private:
+  std::uint32_t _dim;
+  std::vector<value_type> _data;
+};
+
+/// \brief Concept defining the requirements for a valid convolution kernel
+template <class T>
+concept Kernel = requires(T const& k) {
+  { k.view() } -> std::same_as<KView>;
+  { k.getDim() } -> std::convertible_to<std::uint32_t>;
+};
+
+} // namespace conv::core

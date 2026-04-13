@@ -1,0 +1,14 @@
+export module conv:io;
+export import :core;
+
+export namespace conv::io {
+/// \brief Loads an image from disk and converts it to a grayscale
+/// representation.
+/// \param path The filesystem path to the target image file.
+/// \return A core::Image containing the grayscale pixel data
+auto loadGrayscaleImage(std::filesystem::path const& path) -> core::Image;
+/// \brief Saves a grayscale image to disk in PNG format.
+/// \param path The filesystem path where the image will be written.
+/// \param img The image data to serialize
+auto savePNG(std::filesystem::path const& path, core::Image const& img) -> void;
+} // namespace conv::io

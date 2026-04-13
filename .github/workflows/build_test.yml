@@ -1,0 +1,77 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [ '**' ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-build
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} - ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        build_type: [ Release, ALUSan, TSan ]
+        exclude:
+          - os: windows-latest
+            build_type: ALUSan
+          - os: windows-latest
+            build_type: TSan
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: '0'
+
+      - name: Install xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          actions-cache-folder: '.xmake-cache'
+
+      - name: Install LLVM22 toolchain (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo add-apt-repository "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-22 main"
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          sudo apt-get update
+          # `libclang-rt-22-dev` for sanitizers
+          sudo apt-get install clang-22 lld-22 clang-tools-22 llvm-22 libc++-22-dev libc++abi-22-dev libclang-rt-22-dev -y --no-install-recommends
+          echo "/usr/lib/llvm-22/bin" >> $GITHUB_PATH
+
+      - name: Install LLVM22 toolchain (Windows)
+        if: matrix.os == 'windows-latest'
+        run : |
+          $version = "20260324"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+          Invoke-WebRequest -Uri $url -OutFile "llvm-mingw.zip"
+          Expand-Archive -Path "llvm-mingw.zip" -DestinationPath ${{ runner.temp }}
+          Move-Item -Path "${{ runner.temp }}\llvm-mingw-$version-ucrt-x86_64" -Destination "${{ runner.temp }}\llvm-mingw"
+          echo "${{ runner.temp }}\llvm-mingw\bin" >> $env:GITHUB_PATH
+        # run: |
+        #   choco install llvm --version 22.1.0 -y #clang-scan-deps, llvm-ar?
+        #   echo "C:\Program Files\LLVM\bin" >> $GITHUB_PATH
+
+      - name: Configure and build the library
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            xmake f -m ${{ matrix.build_type }} -y
+          else
+            xmake f -v -m ${{ matrix.build_type }} --sdk="${{ runner.temp }}/llvm-mingw" -y
+          fi
+          xmake
+
+      - name: Build and run unit tests
+        run: |
+          xmake b test
+          xmake test -v
